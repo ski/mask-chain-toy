@@ -1,38 +1,47 @@
 /**
- * The mask declarations. Compare these to the autopoet `Mask` type — note
- * that there's NO `terminalTool: 'morph_to_planner'` field here. The mask
- * just lists its tools. The engine has no idea which one is "the morph"
- * because that distinction doesn't exist in this architecture.
+ * Core mask declarations. Compare to the autopoet `Mask` type — note
+ * that there's no `terminalTool` field. The engine has zero special
+ * knowledge of which tools end a step.
  *
- * If you want a different mask transition, add a new tool to the tools
- * array — that's it. No engine changes, no terminal-tool registry update.
+ * v2: receptionist gains access to the meta-tools (define_tool,
+ * define_mask, attach_tool_to_mask) so the agent can extend itself
+ * mid-conversation. Those tools do real things — see meta-tools.ts.
  */
 
-import type { Mask, MaskName } from './types.js';
+import type { Mask } from './types.js';
 import {
   ASK_QUESTION,
   COMPLETE_SESSION,
   LOOKUP_OPTIONS,
   MORPH_TO_PLANNER,
 } from './tools.js';
+import { ATTACH_TOOL_TO_MASK, DEFINE_MASK, DEFINE_TOOL } from './meta-tools.js';
 
 export const RECEPTIONIST_MASK: Mask = {
   name: 'receptionist',
   systemPrompt:
     'You are a receptionist. Greet the visitor, capture their name and intent ' +
-    'using ask_question, then morph_to_planner with both fields filled in.',
-  tools: [ASK_QUESTION, MORPH_TO_PLANNER],
+    'using ask_question. If their intent fits a known handler (planner: trip ' +
+    'planning), morph there. If not, you can use define_tool + define_mask + ' +
+    'attach_tool_to_mask to grow a new handler, then morph into it.',
+  tools: [
+    ASK_QUESTION,
+    MORPH_TO_PLANNER,
+    DEFINE_TOOL,
+    DEFINE_MASK,
+    ATTACH_TOOL_TO_MASK,
+  ],
 };
 
 export const PLANNER_MASK: Mask = {
   name: 'planner',
   systemPrompt:
-    'You are a planner. The receptionist captured the visitor\'s name + intent. ' +
-    'Look up options matching the intent, pick one, and complete_session with the plan.',
+    'You are a planner. Look up trip options matching the visitor intent, ' +
+    'pick one, and complete_session with the plan.',
   tools: [LOOKUP_OPTIONS, COMPLETE_SESSION],
 };
 
-export const MASK_REGISTRY: Record<MaskName, Mask> = {
-  receptionist: RECEPTIONIST_MASK,
-  planner: PLANNER_MASK,
-};
+/** Both masks export COMPLETE_SESSION-equivalents indirectly: an
+ *  agent-defined mask can declare COMPLETE_SESSION in its tool list
+ *  (it's a registered tool name) and end the chain itself. */
+export const CORE_MASKS: Mask[] = [RECEPTIONIST_MASK, PLANNER_MASK];

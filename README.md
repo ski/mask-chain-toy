@@ -1,50 +1,72 @@
 # mask-chain-toy
 
-A 200-line, runnable demonstration of the **morph-as-tool** / **tools-as-control-flow** pattern. Read it to understand how a multi-mask agent loop hangs together when the engine treats every state transition as just-another-tool.
+A small, runnable demonstration of two ideas, in one repo:
 
-Companion to a design conversation about [autopoet/themis](https://github.com/ski/autopose). Self-contained — no Cloudflare, no real LLM, no external services.
+1. **Tools-as-control-flow.** The engine special-cases nothing — even mask transitions are just tools that return `{ kind: 'terminate' }`.
+2. **Self-modifying agents.** Because every transition is a tool, an agent can *write* new tools and masks at runtime and morph into them on the same turn. This is the meta-model — code that executes and modifies itself.
+
+Companion to a design conversation about [autopoet/themis](https://github.com/ski/autopose). Self-contained — no Cloudflare, no real LLM, no external services. ~600 lines including comments.
 
 ## Run it
 
 ```bash
 pnpm install
-pnpm start
+
+pnpm start              # scenario 'trip' — uses pre-existing masks (read this first)
+pnpm start renovation   # scenario 'renovation' — agent invents a tool + mask mid-conversation
 ```
 
-You'll see a conversation flow through two masks (receptionist → planner), morphing in the middle, cascading the new mask's first turn off the morph, and ending the chain when the planner locks in a plan.
+## Scenario 1: pre-existing chain
 
-## What you'll see
+Receptionist captures the visitor's name + intent, then morphs into the planner. Planner looks up options, picks one, ends the chain.
 
 ```
-━━━ mask-chain-toy ━━━
-starting mask: receptionist
-
+━━━ mask-chain-toy (scenario: trip) ━━━
 → visitor: "hi"
   [receptionist] Welcome! What's your name?
-
 → visitor: "Alice"
   [receptionist] Nice to meet you, Alice. What can I help you with today?
     [engine] captured visitor_name=Alice
-
 → visitor: "I want to plan a trip somewhere quiet"
   [receptionist] Trip planning — got it. Let me hand you to our planner.
-    [engine] captured visitor_intent=plan a trip to somewhere quiet
-    [engine] morphed receptionist → planner (name=Alice, intent="...")
-
+    [engine] morphed receptionist → planner (name=Alice, intent="…")
 ↳ cascade-fire into 'planner'
   [planner] Hi Alice — let me find some options for you.
-    [engine] looked up 3 options for "plan a trip to somewhere quiet"
-  [planner] Iceland, 4 days. Quiet, dramatic, great for unwinding. ...
-    [engine] session complete with plan: "Iceland 4-day: ..."
-
-━━━ session complete ━━━
-final mask:    planner
-final status:  complete
-final artifacts:
-  visitor_name: "Alice"
-  visitor_intent: "plan a trip to somewhere quiet"
-  plan: "Iceland 4-day: ..."
+  [planner] Iceland, 4 days. …
+    [engine] session complete: …
 ```
+
+## Scenario 2: self-modification
+
+Visitor wants a kitchen-reno quote — receptionist has no mask for that. So in **one turn** the agent:
+
+1. `define_tool` → registers `estimate_renovation` (a structured op-spec the engine compiles)
+2. `define_mask` → registers `estimator` mask using that tool
+3. `define_tool` → registers `morph_to_estimator` (also as ops)
+4. `attach_tool_to_mask` → binds the new morph onto receptionist
+5. fires `morph_to_estimator` — which only existed seconds ago
+
+```
+━━━ mask-chain-toy (scenario: renovation) ━━━
+→ visitor: "I need a quote for a kitchen renovation"
+  [receptionist] Renovations — let me set up an estimator for that.
+    [engine] defined tool: estimate_renovation (3 ops)
+    [engine] defined mask: estimator (2 tools)
+    [engine] defined tool: morph_to_estimator (3 ops)
+    [engine] attached tool 'morph_to_estimator' to mask 'receptionist'
+    [engine] (agent-defined: morph_to_estimator) handed off to agent-built estimator
+↳ cascade-fire into 'estimator'
+  [estimator] Looking at a kitchen reno — let me run the numbers.
+  [estimator] £18,500 ballpark, 6 weeks. …
+━━━ session complete ━━━
+registry now:   9 tools, 3 masks
+agent-defined:
+  + tool: estimate_renovation
+  + tool: morph_to_estimator
+  + mask: estimator
+```
+
+The agent grew its own toolkit and chain. Engine code didn't change. Restart the run, registry resets to 7 tools / 2 masks — you've drawn no extra surface area for the engine.
 
 ## The pattern
 
@@ -59,19 +81,12 @@ type ToolResult =
 **`continue`** — engine feeds the observation back to the LLM and loops.
 **`terminate`** — engine stops the current step.
 
-A morph is just a tool that:
-1. Mutates the manifest (captures the brief).
-2. Calls `ctx.setNextMask('planner')`.
-3. Returns `{ kind: 'terminate' }`.
+A morph is just a tool that mutates state via `ctx.setNextMask(...)` and returns `{ kind: 'terminate' }`. The engine has zero special knowledge of "morphs" or "terminal tools."
 
-That's it. The engine has zero special knowledge of "morphs" or "terminal tools." It runs every action's `execute` the same way and exits when one of them says so.
-
-## Why this matters
-
-Compare against the alternative — engine special-cases the morph:
+### Compare against the alternative — engine special-cases the morph
 
 ```ts
-// the OTHER way (not what this toy does)
+// the OTHER way (NOT what this toy does)
 if (action.tool === mask.terminalTool) {           // engine knows the magic name
   manifest.artifacts = { ...manifest.artifacts, ...action.input.artifacts };
   emit.morph(mask.nextMask, action.input);          // engine calls a special callback
@@ -80,43 +95,112 @@ if (action.tool === mask.terminalTool) {           // engine knows the magic nam
 const observation = await tool.execute(...);        // regular tools take this path
 ```
 
-That works, but it splits "tool" semantics into two tracks: **the morph tool** (engine handles) vs **regular tools** (tool handles). Two mental models for one concept. Engine grows a `terminalTool` field, a `nextMask` field, a special-case branch.
+That works, but it splits "tool" semantics into two tracks — engine grows a `terminalTool` field, a `nextMask` field, a special-case branch. The morph-as-tool refactor collapses both tracks. One mental model, smaller engine, and the agent can write its own morph tools because morph tools are no longer privileged.
 
-The morph-as-tool refactor collapses both tracks. One mental model, smaller engine, and you get **entry/exit hooks for free**: a tool can do *anything* in its `execute` — fetch data, validate the brief, emit telemetry, write episodes to memory, even fire other tools. Engine doesn't need to grow new hook surfaces.
+## How the agent "writes code"
 
-### What you get for free
+The agent doesn't emit JavaScript. It emits a structured **op-spec** — a list of small primitives the runtime knows how to interpret.
 
-- **Validation gates.** A morph tool can return `{ kind: 'continue', observation: { error: '...' } }` if the brief is incomplete — model bounces back, re-plans. No engine-level validator.
-- **Composition.** A `morph_to_planner` tool can call `save_episode` internally before terminating. Engine doesn't care.
-- **Uniform telemetry.** Every state transition is a tool call → emits the same `toolStart` / `toolEnd` events. Observability sees one shape instead of two.
-- **Easier testing.** Each tool is a function with a context. No engine-level "morph happened" assertions needed.
+```ts
+type Op =
+  | { op: 'capture'; field: string; from: 'input'; path: string }   // input.path → manifest.artifacts.field
+  | { op: 'capture'; field: string; from: 'literal'; value: unknown }
+  | { op: 'observe'; value: unknown }
+  | { op: 'morph'; to: MaskName }
+  | { op: 'complete' }
+  | { op: 'log'; message: string }
+  | { op: 'terminate' };
+```
 
-### What you give up
+`compileToolSpec(spec)` walks the body and returns a real `Tool` whose `execute` interprets the ops at call time. Adding a new op = giving the agent a new building block. Removing an op = revoking a capability.
 
-- **Tool surface power.** Tools mutate manifest state via `ctx`. Bad tool = bad day. Mitigated by keeping `ToolContext` narrow (this toy's surface is 4 methods).
-- **Engine-level invariant clarity.** "Morphing" used to be one place in the engine; now it's spread across the morph tools. Read the tool to know what it does.
+**No `eval`. No `new Function`. No string-of-JS to run.** Everything the agent emits is bound by the union above; an unknown op gets logged and skipped.
 
 ## Files
 
 | File | What |
 |---|---|
-| [`src/types.ts`](src/types.ts) | The whole type surface (~50 lines). Read first. |
+| [`src/types.ts`](src/types.ts) | Type surface (Tool, Mask, Op, ToolSpec, Registry). Read first. |
+| [`src/registry.ts`](src/registry.ts) | Mutable catalog + `compileToolSpec` (Op[] → Tool). |
+| [`src/tools.ts`](src/tools.ts) | Core tools (immutable). |
+| [`src/meta-tools.ts`](src/meta-tools.ts) | `define_tool`, `define_mask`, `attach_tool_to_mask`. |
+| [`src/masks.ts`](src/masks.ts) | Core masks. |
 | [`src/engine.ts`](src/engine.ts) | The loop. Notice what _isn't_ here. |
-| [`src/tools.ts`](src/tools.ts) | All tools, morphs included. They look the same. |
-| [`src/masks.ts`](src/masks.ts) | Mask declarations. No `terminalTool` field. |
-| [`src/llm-mock.ts`](src/llm-mock.ts) | Scripted "model" so the run is deterministic. |
+| [`src/llm-mock.ts`](src/llm-mock.ts) | Scripted scenarios. |
 | [`src/main.ts`](src/main.ts) | Wire it together. |
 
-## Cascade-fire
+## What you get for free with this shape
 
-When a tool morphs (`ctx.setNextMask('planner')`), the outer `runConversation` loop notices `manifest.currentMask` changed and runs the new mask's first turn with an `[INTERNAL]` user message — without consuming a real visitor message. That's "cascade-fire" — the new mask gets to speak immediately rather than waiting for the visitor to nudge it.
+- **Validation gates.** A morph tool can return `{ kind: 'continue', observation: { error: '…' } }` if the brief is incomplete — the model bounces, re-plans. No engine-level validator.
+- **Composition.** A morph tool can call other tools internally before terminating. Engine doesn't care.
+- **Uniform telemetry.** Every state transition is a tool call → emits the same `toolStart` / `toolEnd` events. Observability sees one shape instead of two.
+- **Easier testing.** Each tool is a function with a context. No engine-level "morph happened" assertions needed.
+- **Self-extending toolkits.** Agent invents new tools as data, registers them, uses them on the next turn. See scenario 2.
+- **Self-extending mask chains.** Agent designs a new mask + morph + transitions into it. The chain becomes data the agent can edit.
 
-The toy bounds cascade depth implicitly: each cascade iteration loops back to the top of `while (manifest.currentMask !== previousMask)`. If a chain morphs again on entry, the outer loop catches it. A real system might cap this to one or two levels to prevent runaway swaps; the toy doesn't bother because the script is finite.
+## Real questions before scaling self-modification
+
+The toy is deliberately small — these are the load-bearing decisions a real system has to settle:
+
+### 1. Safety surface
+
+A `define_tool` that accepts JS strings + uses `eval` is a remote-code-execution primitive. Two mitigations, in order of severity:
+
+- **Structured ops (this toy's choice).** Agent emits data describing behaviour; runtime interprets. Adversarial input is bounded by the op union.
+- **Sandboxed code.** If the structured DSL is too restrictive, run untrusted JS in `vm2`, `isolated-vm`, or WASM. Adds complexity but keeps native expressiveness.
+
+Don't ship `eval(string)` even in research builds. The blast radius is the entire process.
+
+### 2. Persistence + replay
+
+When the agent invents a tool, where does it live? Three options with different durability:
+
+- **In-memory only** (this toy). Lost on restart. Fine for sessions.
+- **Written to disk / DB.** Survives restart. The agent's "skill library" persists across sessions.
+- **Committed to git.** Tools become files the agent re-reads on next session. Self-improving codebase. Voyager (Minecraft agent) does this.
+
+Each level adds ops complexity. Pick by need.
+
+### 3. Validation
+
+A tool the agent wrote may be subtly wrong. You want a **self-test loop** — when the agent registers a tool, run it against a tiny fixture before letting other masks rely on it. Voyager does this; their skill-validation step is half the value of the system.
+
+The toy doesn't validate; in production you'd add a `test_tool` meta-tool the agent fires after `define_tool`, with a small fixture and an assertion.
+
+### 4. Forgetting
+
+A growing tool library with no pruning is a context-window disaster. Two mitigations:
+
+- **Skill retrieval.** Don't load every registered tool into the LLM's context every turn. Embed each tool's `describe`, semantically retrieve the top-K relevant ones for the current step.
+- **TTL / usage tracking.** Tools the agent hasn't fired in N steps get archived. Prevents drift accumulation.
+
+### 5. Meta-stability
+
+What stops the agent from rewriting `morph_to_planner` to a buggy version? The toy enforces an `isCoreTool` / `isCoreMask` check — the meta-tools refuse to overwrite anything flagged core during bootstrap. Agent-defined work is mutable; engine-shipped work isn't.
+
+For a real system, also consider:
+
+- **Versioning.** Every `define_tool` writes a new version; old versions are queryable for rollback.
+- **Provenance.** Each agent-defined tool carries which mask defined it, which conversation, which turn. Audit trail.
+- **Quorum.** A tool only enters the registry after N successful test runs.
+
+### 6. Cascade depth
+
+Self-modification can cause infinite cascades — agent defines a mask whose first turn defines another mask whose first turn defines another mask. The toy's outer loop has an implicit bound (each cascade only fires once `currentMask` changes from `previousMask` and progress runs out), but a real system wants an explicit max-cascade-depth counter.
 
 ## Not in scope (deliberately)
 
-- Real LLM integration (`Llm` interface is one method — drop in Anthropic / OpenAI behind it).
-- Persistence (manifest is in-memory; real systems persist to a DO / DB).
-- Streaming (tools return resolved promises; real systems stream patter chunks).
-- Error recovery (tools throw → engine doesn't catch; real systems wrap and feed errors back as observations).
-- Parallelism (actions run sequentially in this toy; real systems often parallelise non-terminal tools).
+- Real LLM integration. The `Llm` interface is one method — drop in Anthropic / OpenAI behind it.
+- Persistence. Manifest is in-memory.
+- Streaming. Tools return resolved promises.
+- Error recovery beyond "return an error observation."
+- Parallelism — actions run sequentially.
+- The harder safety + persistence + validation knobs above. Sketched, not built.
+
+## Prior art / further reading
+
+- **Voyager** ([2305.16291](https://arxiv.org/abs/2305.16291)) — Minecraft agent that writes JS skills, validates them, builds a library. The canonical reference for self-extending agents.
+- **Generative Agents** ([2304.03442](https://arxiv.org/abs/2304.03442)) — believable agent simulacra that maintain memory + reflection loops.
+- **MetaGPT, AutoGen, CrewAI** — various flavours of multi-agent orchestration with different stances on whether agents can modify the orchestration itself.
+
+The piece this toy emphasises that those don't always: **state transitions as first-class tools**. That's the precondition for self-modification of the chain itself, not just of the toolkit.
