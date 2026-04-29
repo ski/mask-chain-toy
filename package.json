@@ -1,0 +1,14 @@
+{
+  "name": "mask-chain-toy",
+  "version": "0.1.0",
+  "description": "A 200-line toy demonstrating the morph-as-tool / tools-as-control-flow pattern. Read the code, run it, see how a multi-mask agent loop hangs together.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "build": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
