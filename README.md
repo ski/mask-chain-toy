@@ -1,11 +1,12 @@
 # mask-chain-toy
 
-A small, runnable demonstration of two ideas, in one repo:
+A small, runnable demonstration of three ideas, in one repo:
 
 1. **Tools-as-control-flow.** The engine special-cases nothing — even mask transitions are just tools that return `{ kind: 'terminate' }`.
-2. **Self-modifying agents.** Because every transition is a tool, an agent can *write* new tools and masks at runtime and morph into them on the same turn. This is the meta-model — code that executes and modifies itself.
+2. **Self-modifying agents.** Because every transition is a tool, an agent can *write* new tools and masks at runtime and morph into them on the same turn.
+3. **Composition + verification.** An invented tool can compose existing tools (so the new behaviour does real work, not just returns a literal), and the agent can run a fixture-based test against its own creation before any other mask depends on it.
 
-Companion to a design conversation about [autopoet/themis](https://github.com/ski/autopose). Self-contained — no Cloudflare, no real LLM, no external services. ~600 lines including comments.
+Companion to a design conversation about [autopoet/themis](https://github.com/ski/autopose). Self-contained — no Cloudflare, no real LLM, no external services. ~700 lines including comments.
 
 ## Run it
 
@@ -36,37 +37,41 @@ Receptionist captures the visitor's name + intent, then morphs into the planner.
     [engine] session complete: …
 ```
 
-## Scenario 2: self-modification
+## Scenario 2: self-modification with composition + verification
 
-Visitor wants a kitchen-reno quote — receptionist has no mask for that. So in **one turn** the agent:
+Visitor wants a kitchen-reno quote — receptionist has no mask for that. The agent:
 
-1. `define_tool` → registers `estimate_renovation` (a structured op-spec the engine compiles)
-2. `define_mask` → registers `estimator` mask using that tool
-3. `define_tool` → registers `morph_to_estimator` (also as ops)
-4. `attach_tool_to_mask` → binds the new morph onto receptionist
-5. fires `morph_to_estimator` — which only existed seconds ago
+1. `define_tool` → registers `estimate_renovation`. Its body uses the **`call_tool`** op to delegate into the existing `lookup_options` tool — so the new tool actually does work by composing what's already there, not by returning a literal.
+2. `test_tool` → runs the new tool against a small fixture (input + expected observation keys + expected artifacts). On pass, the tool gets added to `registry.verified`. On fail, the agent sees the errors and re-plans. **This is the verification half** — Voyager's environmental-feedback step, with an agent-supplied fixture instead of a Minecraft world.
+3. `define_mask` → registers `estimator` using the (now-verified) tool.
+4. `define_tool` + `attach_tool_to_mask` → builds and attaches `morph_to_estimator`.
+5. fires `morph_to_estimator` — which only existed seconds ago.
 
 ```
 ━━━ mask-chain-toy (scenario: renovation) ━━━
 → visitor: "I need a quote for a kitchen renovation"
-  [receptionist] Renovations — let me set up an estimator for that.
+  [receptionist] Renovations — let me set something up for that.
     [engine] defined tool: estimate_renovation (3 ops)
+    [engine] (test:estimate_renovation) looked up 3 options for "kitchen renovation"
+    [engine] test_tool estimate_renovation: PASS — verified
+  [receptionist] Verified the estimator. Routing you to it now.
     [engine] defined mask: estimator (2 tools)
     [engine] defined tool: morph_to_estimator (3 ops)
     [engine] attached tool 'morph_to_estimator' to mask 'receptionist'
     [engine] (agent-defined: morph_to_estimator) handed off to agent-built estimator
 ↳ cascade-fire into 'estimator'
-  [estimator] Looking at a kitchen reno — let me run the numbers.
-  [estimator] £18,500 ballpark, 6 weeks. …
+  [estimator] Composing your kitchen-reno quote from current option data.
+    [engine] looked up 3 options for "kitchen renovation"
+  [estimator] Three options came back from lookup; quote built around them. …
 ━━━ session complete ━━━
-registry now:   9 tools, 3 masks
+registry now:   10 tools, 3 masks
 agent-defined:
   + tool: estimate_renovation
   + tool: morph_to_estimator
   + mask: estimator
 ```
 
-The agent grew its own toolkit and chain. Engine code didn't change. Restart the run, registry resets to 7 tools / 2 masks — you've drawn no extra surface area for the engine.
+Note `option_data: {"options":["Option A","Option B","Option C"]}` in the final manifest — that came from `lookup_options` running inside `estimate_renovation`'s body via the `call_tool` op. The invented tool produced real output by delegating to a tool the agent didn't write. Restart the run; the registry resets to 8 tools / 2 masks. Engine code didn't change.
 
 ## The pattern
 
@@ -109,21 +114,24 @@ type Op =
   | { op: 'morph'; to: MaskName }
   | { op: 'complete' }
   | { op: 'log'; message: string }
-  | { op: 'terminate' };
+  | { op: 'terminate' }
+  | { op: 'call_tool'; tool: string; input?: object; capture_to: string };
 ```
 
 `compileToolSpec(spec)` walks the body and returns a real `Tool` whose `execute` interprets the ops at call time. Adding a new op = giving the agent a new building block. Removing an op = revoking a capability.
 
-**No `eval`. No `new Function`. No string-of-JS to run.** Everything the agent emits is bound by the union above; an unknown op gets logged and skipped.
+The `call_tool` op is what makes invented tools do real work. Without it, an agent's new tool can only capture inputs and return literals — structurally interesting but operationally trivial. With it, the new tool delegates into the registry, composing existing capabilities in fresh ways.
+
+**No `eval`. No `new Function`. No string-of-JS to run.** Everything the agent emits is bound by the union above; an unknown op gets logged and skipped. **But** — see the safety section below — this bounds the *vocabulary*, not the *reachability graph*. A `call_tool` op chained into a tool that touches sensitive state is still chained into that state.
 
 ## Files
 
 | File | What |
 |---|---|
-| [`src/types.ts`](src/types.ts) | Type surface (Tool, Mask, Op, ToolSpec, Registry). Read first. |
-| [`src/registry.ts`](src/registry.ts) | Mutable catalog + `compileToolSpec` (Op[] → Tool). |
+| [`src/types.ts`](src/types.ts) | Type surface (Tool, Mask, Op, ToolSpec, Registry, ToolFixture). Read first. |
+| [`src/registry.ts`](src/registry.ts) | Mutable catalog + `compileToolSpec` (Op[] → Tool, including `call_tool`). |
 | [`src/tools.ts`](src/tools.ts) | Core tools (immutable). |
-| [`src/meta-tools.ts`](src/meta-tools.ts) | `define_tool`, `define_mask`, `attach_tool_to_mask`. |
+| [`src/meta-tools.ts`](src/meta-tools.ts) | `define_tool`, `test_tool`, `define_mask`, `attach_tool_to_mask`. |
 | [`src/masks.ts`](src/masks.ts) | Core masks. |
 | [`src/engine.ts`](src/engine.ts) | The loop. Notice what _isn't_ here. |
 | [`src/llm-mock.ts`](src/llm-mock.ts) | Scripted scenarios. |
@@ -151,6 +159,8 @@ A `define_tool` that accepts JS strings + uses `eval` is a remote-code-execution
 
 Don't ship `eval(string)` even in research builds. The blast radius is the entire process.
 
+**The honest caveat.** The op vocabulary being small doesn't mean the *reachability graph* is small. A `call_tool` op chained into `send_email` is still calling `send_email`. A `capture` op writing into an artifact field that a downstream trusted tool reads is still mutating that field. The DSL bounds *what kinds of things* an invented tool can do; it doesn't bound *which existing tools* it can compose with, or *which state fields* it can touch. If your tool registry contains anything you wouldn't hand the agent a literal pointer to, you need either a "safe-to-compose" tag on each tool the agent can `call_tool` into, or a sandbox manifest that scopes `capture` to non-sensitive fields. Neither is in this toy.
+
 ### 2. Persistence + replay
 
 When the agent invents a tool, where does it live? Three options with different durability:
@@ -163,9 +173,15 @@ Each level adds ops complexity. Pick by need.
 
 ### 3. Validation
 
-A tool the agent wrote may be subtly wrong. You want a **self-test loop** — when the agent registers a tool, run it against a tiny fixture before letting other masks rely on it. Voyager does this; their skill-validation step is half the value of the system.
+This is the half Voyager spends most of its complexity budget on, and the toy now demonstrates a minimal version: the `test_tool` meta-tool runs a fixture against a freshly-defined tool, asserts the result kind / observation keys / artifact effects, and adds the tool to `registry.verified` on pass. Other masks can declare `verifiedOnly: true` to refuse anything not in that set.
 
-The toy doesn't validate; in production you'd add a `test_tool` meta-tool the agent fires after `define_tool`, with a small fixture and an assertion.
+What the toy's verification does NOT cover (deliberately):
+
+- **Reachability.** A verified tool can still `call_tool` into something dangerous; the fixture only exercises one path.
+- **Side effects on real systems.** A tool that writes to a real API will write during the test run too. Sandbox if you mean it.
+- **Adversarial fixtures.** The agent that wrote the tool also wrote the fixture. If it can pass its own test, it passes. The next step is a separate "auditor" agent writing fixtures for a "builder" agent's tools — the actual verification loop you'd want in production.
+
+Even the minimal shape catches the commonest failure mode: "the tool I wrote doesn't actually do what I claimed in its describe string."
 
 ### 4. Forgetting
 

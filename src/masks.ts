@@ -15,19 +15,23 @@ import {
   LOOKUP_OPTIONS,
   MORPH_TO_PLANNER,
 } from './tools.js';
-import { ATTACH_TOOL_TO_MASK, DEFINE_MASK, DEFINE_TOOL } from './meta-tools.js';
+import { ATTACH_TOOL_TO_MASK, DEFINE_MASK, DEFINE_TOOL, TEST_TOOL } from './meta-tools.js';
 
 export const RECEPTIONIST_MASK: Mask = {
   name: 'receptionist',
   systemPrompt:
     'You are a receptionist. Greet the visitor, capture their name and intent ' +
     'using ask_question. If their intent fits a known handler (planner: trip ' +
-    'planning), morph there. If not, you can use define_tool + define_mask + ' +
-    'attach_tool_to_mask to grow a new handler, then morph into it.',
+    'planning), morph there. Otherwise grow a handler: define_tool to write a ' +
+    'tool that COMPOSES existing tools (use the call_tool op so the new tool ' +
+    'actually does work, not just returns a literal); test_tool with a small ' +
+    'fixture before relying on it; define_mask using only verified tools; ' +
+    'define + attach a morph tool; morph into the new mask.',
   tools: [
     ASK_QUESTION,
     MORPH_TO_PLANNER,
     DEFINE_TOOL,
+    TEST_TOOL,
     DEFINE_MASK,
     ATTACH_TOOL_TO_MASK,
   ],

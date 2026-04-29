@@ -89,7 +89,14 @@ export type Op =
   | { op: 'morph'; to: MaskName }         // ctx.setNextMask
   | { op: 'complete' }                    // ctx.markComplete
   | { op: 'log'; message: string }
-  | { op: 'terminate' };                  // wraps return as kind: 'terminate'
+  | { op: 'terminate' }                   // wraps return as kind: 'terminate'
+  // v3 — composition + verification primitives.
+  // call_tool invokes another already-registered tool from inside an
+  // agent-defined tool's body, capturing the observation into manifest
+  // under `capture_to`. Lets the agent build new tools that COMPOSE
+  // existing ones — the renovation tool, instead of returning a literal,
+  // calls lookup_options to gather real data.
+  | { op: 'call_tool'; tool: string; input?: Record<string, unknown>; capture_to: string };
 
 export interface ToolSpec {
   name: string;
@@ -116,4 +123,36 @@ export interface Registry {
    *  meta-tools refuse to overwrite these — the agent can't accidentally
    *  redefine `define_tool` to be a no-op. */
   core: Set<string>;
+  /** v3 — set of tool names that have passed at least one fixture run
+   *  via the `test_tool` meta-tool. The engine doesn't gate on this
+   *  itself, but masks can opt in: a mask declared with
+   *  `verifiedOnly: true` will refuse to dispatch to unverified
+   *  agent-defined tools. Voyager uses environmental feedback for the
+   *  same effect; we use a fixture the agent supplies. */
+  verified: Set<string>;
+}
+
+/**
+ * Fixture an agent supplies when it asks the runtime to verify a tool
+ * it just defined. The `test_tool` meta-tool runs the named tool with
+ * `input` and asserts the result matches the expectations below. On
+ * pass, the tool is added to `registry.verified`. On fail, the agent
+ * gets the error back as an observation and re-plans (typically by
+ * editing the tool's body and re-defining).
+ *
+ * Intentionally narrow: a fixture can only assert the result kind, that
+ * the observation contains certain keys, and that some artifact ended up
+ * with an expected value. Anything more elaborate is its own tool.
+ */
+export interface ToolFixture {
+  /** Name of the registered tool to test. */
+  tool: string;
+  /** Input passed to the tool's execute. */
+  input: Record<string, unknown>;
+  /** Expected result kind ('continue' or 'terminate'). */
+  expects_kind?: 'continue' | 'terminate';
+  /** Keys the observation object must contain (top-level only). */
+  expects_observation_keys?: string[];
+  /** Specific artifact assertions: { field: expected_value }. */
+  expects_artifacts?: Record<string, unknown>;
 }

@@ -28,6 +28,7 @@ export function createRegistry(): Registry {
     tools: new Map(),
     masks: new Map(),
     core: new Set(),
+    verified: new Set(),
   };
 }
 
@@ -91,9 +92,26 @@ export function compileToolSpec(spec: ToolSpec): Tool {
           case 'terminate':
             kind = 'terminate';
             break;
+          case 'call_tool': {
+            // Composition primitive. The invented tool delegates to an
+            // already-registered tool, then captures the observation into
+            // the manifest. This is what lets a renovation tool actually
+            // call lookup_options instead of returning a literal.
+            const inner = ctx.registry.tools.get(op.tool);
+            if (!inner) {
+              ctx.log(`call_tool: '${op.tool}' not registered — skipped`);
+              ctx.manifest.artifacts[op.capture_to] = { error: `unknown tool: ${op.tool}` };
+              break;
+            }
+            const result = await inner.execute(op.input ?? {}, ctx);
+            ctx.manifest.artifacts[op.capture_to] = result.observation ?? null;
+            // If the inner tool said terminate, propagate. Otherwise keep
+            // walking the body.
+            if (result.kind === 'terminate') kind = 'terminate';
+            break;
+          }
           default: {
-            // Unknown op — log + skip rather than crash. Adversarial /
-            // malformed input shouldn't take the loop down.
+            // Unknown op — log + skip rather than crash.
             const unknown = op as { op: string };
             ctx.log(`compileToolSpec: unknown op '${unknown.op}' in '${spec.name}' — skipped`);
           }

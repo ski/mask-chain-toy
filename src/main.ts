@@ -18,9 +18,9 @@
 
 import { runConversation } from './engine.js';
 import { createMockLlm } from './llm-mock.js';
-import { CORE_MASKS, RECEPTIONIST_MASK, PLANNER_MASK } from './masks.js';
+import { CORE_MASKS } from './masks.js';
 import { CORE_TOOLS } from './tools.js';
-import { ATTACH_TOOL_TO_MASK, DEFINE_MASK, DEFINE_TOOL } from './meta-tools.js';
+import { ATTACH_TOOL_TO_MASK, DEFINE_MASK, DEFINE_TOOL, TEST_TOOL } from './meta-tools.js';
 import { bootstrap, createRegistry } from './registry.js';
 import type { Manifest } from './types.js';
 
@@ -37,7 +37,11 @@ async function main(): Promise<void> {
 
   // Bootstrap the runtime catalog. Core tools + masks are flagged
   // immutable so agent-defined work can't overwrite them.
-  bootstrap(registry, [...CORE_TOOLS, DEFINE_TOOL, DEFINE_MASK, ATTACH_TOOL_TO_MASK], CORE_MASKS);
+  bootstrap(
+    registry,
+    [...CORE_TOOLS, DEFINE_TOOL, TEST_TOOL, DEFINE_MASK, ATTACH_TOOL_TO_MASK],
+    CORE_MASKS,
+  );
 
   const manifest: Manifest = {
     status: 'active',

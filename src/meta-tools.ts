@@ -17,7 +17,7 @@
  */
 
 import { compileToolSpec, isCoreMask, isCoreTool } from './registry.js';
-import type { MaskSpec, Tool, ToolSpec } from './types.js';
+import type { Manifest, MaskSpec, Tool, ToolContext, ToolFixture, ToolSpec } from './types.js';
 
 const VALID_OPS = new Set([
   'capture',
@@ -26,6 +26,7 @@ const VALID_OPS = new Set([
   'complete',
   'log',
   'terminate',
+  'call_tool',
 ]);
 
 export const DEFINE_TOOL: Tool = {
@@ -93,6 +94,95 @@ export const DEFINE_MASK: Tool = {
     });
     ctx.log(`defined mask: ${spec.name} (${resolved.length} tools)`);
     return { kind: 'continue', observation: { ok: true, registered: spec.name } };
+  },
+};
+
+/**
+ * test_tool — verification primitive (Voyager-style, with a fixture
+ * supplied by the agent instead of environmental feedback).
+ *
+ * The agent invented a tool. Before another mask leans on it, the agent
+ * calls `test_tool` with a small fixture: input → expected outcome. If
+ * the tool produces the expected shape, the runtime records it in
+ * `registry.verified` and other masks can declare `verifiedOnly: true`
+ * to refuse anything not in that set.
+ *
+ * What this does NOT cover (deliberately, for now):
+ *   - Reachability through the rest of the registry. A verified tool
+ *     can still call_tool into something dangerous; the fixture only
+ *     exercises one path.
+ *   - Side effects on external systems. A tool that writes to a real
+ *     API will write during the test run too. Sandbox if you mean it.
+ *   - Adversarial fixtures. The agent that wrote the tool also wrote
+ *     the fixture; if it can pass its own test, it passes. A second
+ *     agent ("auditor") writing fixtures for a "builder" agent's tools
+ *     is the real verification loop. Not in this toy.
+ *
+ * That said: even this minimal shape catches "the tool I wrote doesn't
+ * actually do what I claimed in its describe string." Which is the
+ * commonest failure mode.
+ */
+export const TEST_TOOL: Tool = {
+  name: 'test_tool',
+  describe:
+    'Run a registered tool against a fixture and mark verified on pass. ' +
+    'Input: { tool, input, expects_kind?, expects_observation_keys?, expects_artifacts? }',
+  execute: async (input, ctx) => {
+    const fixture = input as unknown as ToolFixture;
+    if (typeof fixture?.tool !== 'string' || !fixture.tool) {
+      return { kind: 'continue', observation: { error: 'tool name required' } };
+    }
+    const target = ctx.registry.tools.get(fixture.tool);
+    if (!target) {
+      return { kind: 'continue', observation: { error: `tool '${fixture.tool}' not registered` } };
+    }
+
+    // Run the target against a sandbox manifest so test runs don't
+    // mutate live conversation state. Tools that flip currentMask or
+    // markComplete inside their body don't affect the real session.
+    const sandbox: Manifest = {
+      status: 'active',
+      currentMask: ctx.manifest.currentMask,
+      artifacts: {},
+    };
+    const sandboxCtx: ToolContext = {
+      manifest: sandbox,
+      registry: ctx.registry,
+      setNextMask: () => {},
+      markComplete: () => {},
+      log: (m) => ctx.log(`(test:${fixture.tool}) ${m}`),
+    };
+
+    const result = await target.execute(fixture.input ?? {}, sandboxCtx);
+
+    const errors: string[] = [];
+    if (fixture.expects_kind && result.kind !== fixture.expects_kind) {
+      errors.push(`kind mismatch: expected '${fixture.expects_kind}', got '${result.kind}'`);
+    }
+    if (fixture.expects_observation_keys?.length) {
+      const obs = (result.observation ?? {}) as Record<string, unknown>;
+      const present = obs && typeof obs === 'object' ? Object.keys(obs) : [];
+      const missing = fixture.expects_observation_keys.filter((k) => !present.includes(k));
+      if (missing.length > 0) {
+        errors.push(`observation missing keys: ${missing.join(', ')}`);
+      }
+    }
+    if (fixture.expects_artifacts) {
+      for (const [k, v] of Object.entries(fixture.expects_artifacts)) {
+        if (sandbox.artifacts[k] !== v) {
+          errors.push(`artifact '${k}' = ${JSON.stringify(sandbox.artifacts[k])}, expected ${JSON.stringify(v)}`);
+        }
+      }
+    }
+
+    if (errors.length > 0) {
+      ctx.log(`test_tool ${fixture.tool}: FAIL — ${errors.join('; ')}`);
+      return { kind: 'continue', observation: { ok: false, errors } };
+    }
+
+    ctx.registry.verified.add(fixture.tool);
+    ctx.log(`test_tool ${fixture.tool}: PASS — verified`);
+    return { kind: 'continue', observation: { ok: true, verified: fixture.tool } };
   },
 };
 

@@ -57,11 +57,22 @@ const SCRIPTS: Record<Scenario, Record<string, ScriptedTurn[]>> = {
     ],
   },
 
-  // ── Scenario 2: self-modification. ───────────────────────────────────
-  // Receptionist learns the visitor wants a renovation quote — no
-  // existing mask handles that. So it: defines a tool, defines a mask
-  // that uses it, defines a morph tool that targets the new mask,
-  // attaches the morph tool to itself, then fires it.
+  // ── Scenario 2: self-modification with composition + verification. ──
+  // Receptionist learns the visitor wants a renovation quote. No existing
+  // mask handles that. The agent:
+  //   1. Defines `estimate_renovation` whose body COMPOSES the existing
+  //      lookup_options tool via `call_tool` — pulls real data, captures
+  //      it, observes a structured quote built from the lookup result.
+  //   2. Calls `test_tool` against a fixture BEFORE letting any other
+  //      mask depend on it. If the fixture fails the agent re-plans.
+  //   3. Defines an `estimator` mask using the (now-verified) tool.
+  //   4. Defines a morph tool, attaches it, fires it.
+  //
+  // The composition step makes the new tool actually do work — not just
+  // return a literal. The verification step catches the case where the
+  // tool's behaviour drifts from its describe string. Together they
+  // close the gap between "the agent grew a thing" and "the thing the
+  // agent grew is trustworthy."
   renovation: {
     receptionist: [
       { patter: 'Welcome! What\'s your name?', actions: [] },
@@ -70,48 +81,86 @@ const SCRIPTS: Record<Scenario, Record<string, ScriptedTurn[]>> = {
         actions: [{ tool: 'ask_question', input: { field: 'visitor_name', value: 'Bob' } }],
       },
       {
-        // CRITICAL TURN — agent realises the request doesn't fit any known
-        // mask, so it builds the missing pieces inline. Five tool calls
-        // in one turn:
-        //   1. define a domain tool (estimate_renovation)
-        //   2. define a mask that uses it (estimator)
-        //   3. define a morph tool targeting the new mask
-        //   4. attach the morph tool to receptionist
-        //   5. fire the morph tool
-        // Each runs through the same uniform engine path. The morph
-        // tool is just data the agent emitted seconds earlier.
+        // TURN 1 of self-modification: capture intent, define the
+        // composing tool, verify it, define the mask. We split this
+        // across two turns (this one + the next) so the verification
+        // observation can be seen and reacted to before we commit to
+        // morphing — that's the realistic shape, not "do everything
+        // optimistically in one turn."
         patter:
-          'Renovations — let me set up an estimator for that.',
+          'Renovations — let me set something up for that.',
         actions: [
           {
             tool: 'ask_question',
             input: { field: 'visitor_intent', value: 'get a quote for renovating a kitchen' },
           },
           {
+            // The invented tool COMPOSES lookup_options. The body says:
+            //   - capture the scope from input
+            //   - call lookup_options with the scope (captures result
+            //     into manifest.artifacts.option_data)
+            //   - observe a structured quote referencing that data
+            // The estimate isn't a literal anymore — it's "whatever
+            // lookup_options came back with, packaged as a quote shape."
             tool: 'define_tool',
             input: {
               name: 'estimate_renovation',
-              describe: 'Produce a rough renovation quote. Input: { scope }',
+              describe:
+                'Produce a renovation quote by composing lookup_options. Input: { scope }',
               body: [
                 { op: 'capture', field: 'scope', from: 'input', path: 'scope' },
-                { op: 'capture', field: 'estimate_gbp', from: 'literal', value: 18500 },
+                {
+                  op: 'call_tool',
+                  tool: 'lookup_options',
+                  input: { intent: 'kitchen renovation' },
+                  capture_to: 'option_data',
+                },
                 {
                   op: 'observe',
                   value: {
-                    quote_gbp: 18500,
-                    timeline_weeks: 6,
-                    notes: 'rough mid-range estimate; final quote after site visit',
+                    composed_from: 'lookup_options',
+                    quote_shape: 'options-derived',
+                    notes:
+                      'Estimate built by composing the existing lookup_options tool — not a literal.',
                   },
                 },
               ],
             },
           },
           {
+            // Verification fixture. If estimate_renovation doesn't
+            // produce an observation containing 'composed_from', or
+            // doesn't capture 'scope' into the manifest, the test fails
+            // and the agent re-plans. The fixture is written by the
+            // same agent that wrote the tool, so this catches honest
+            // mistakes (didn't capture what I claimed, didn't observe
+            // what I claimed) — it doesn't catch adversarial intent.
+            // For that you'd want a separate "auditor" agent writing
+            // fixtures for the "builder" agent's tools.
+            tool: 'test_tool',
+            input: {
+              tool: 'estimate_renovation',
+              input: { scope: 'kitchen' },
+              expects_kind: 'continue',
+              expects_observation_keys: ['composed_from', 'quote_shape'],
+              expects_artifacts: { scope: 'kitchen' },
+            },
+          },
+        ],
+      },
+      {
+        // TURN 2: verification observation came back (PASS). Now build
+        // the mask using the now-verified tool, define the morph,
+        // attach, fire.
+        patter:
+          'Verified the estimator. Routing you to it now.',
+        actions: [
+          {
             tool: 'define_mask',
             input: {
               name: 'estimator',
               systemPrompt:
-                'You are a renovation estimator. Run estimate_renovation, then complete_session with the quote.',
+                'You are a renovation estimator. Use estimate_renovation to compose a quote, then complete_session.',
               tools: ['estimate_renovation', 'complete_session'],
             },
           },
@@ -134,15 +183,16 @@ const SCRIPTS: Record<Scenario, Record<string, ScriptedTurn[]>> = {
     ],
     estimator: [
       {
-        patter: 'Looking at a kitchen reno — let me run the numbers.',
+        patter: 'Composing your kitchen-reno quote from current option data.',
         actions: [{ tool: 'estimate_renovation', input: { scope: 'kitchen' } }],
       },
       {
-        patter: '£18,500 ballpark, 6 weeks. We\'ll firm it up after a site visit.',
+        patter:
+          'Three options came back from lookup; quote built around them. Sending the structured result.',
         actions: [
           {
             tool: 'complete_session',
-            input: { quote_gbp: 18500, timeline_weeks: 6, scope: 'kitchen' },
+            input: { scope: 'kitchen', method: 'composed via lookup_options' },
           },
         ],
       },
